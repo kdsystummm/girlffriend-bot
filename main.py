@@ -8,7 +8,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-1.0-pro-latest')
 
 PERSONAS = {
     "friend": "You are a friendly and helpful companion. You are supportive, a good listener, and offer great advice. You are a true friend.",
