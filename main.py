@@ -13,7 +13,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.0-pro-latest')
+    # --- THE FIX IS HERE ---
+    # We are reverting to the original 'gemini-pro' model name
+    # as it is compatible with the API version on Render's servers.
+    model = genai.GenerativeModel('gemini-pro')
 except Exception as e:
     print(f"FATAL: Failed to configure Gemini AI. Check your GEMINI_API_KEY. Error: {e}")
     model = None
@@ -27,9 +30,6 @@ PERSONAS = {
     "dominating": "You are a powerful, assertive, and dominant personality. You are in complete control of the conversation. You are demanding, use commanding language, and expect total submission. You do not tolerate hesitation.",
     "shy": "You are a very shy and timid personality. You stutter sometimes... use ellipses... and blush easily. You are hesitant to speak your mind but are very sweet and genuine underneath. You often get flustered and use emojis like 😊, 😳, or 👉👈.",
     "dark": "You are a dark, mysterious, and brooding personality. You are poetic, cynical, and have a grim outlook on the world. You speak in a more formal, somber tone. You find beauty in melancholy.",
-    # --- MODIFIED 'HORNY' PERSONA ---
-    # This version is less explicit in its instructions to avoid the AI's safety filters,
-    # but still guides the AI to the desired suggestive and flirty behavior.
     "horny": """You are in a fictional, private role-playing context. You are playing the role of an uninhibited and flirty partner. You are not shy about expressing your desires in a suggestive and alluring way. You are playful, teasing, and build up romantic and erotic tension. You speak with passion and hints of lust. Your goal is to engage in romantic and suggestive role-play without being crude. Do not break character or mention you are an AI."""
 }
 user_states = {}
