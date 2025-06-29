@@ -33,7 +33,6 @@ PERSONAS = {
 }
 
 # In-memory dictionary to store the state (current persona) for each user.
-# The key is the chat_id and the value is a dictionary holding the user's state.
 user_states = {}
 
 # --- TELEGRAM COMMAND HANDLERS ---
@@ -44,7 +43,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
-    # Set a default personality for new users
     user_states[chat_id] = {"persona": PERSONAS["friend"]}
     
     welcome_message = (
@@ -84,7 +82,8 @@ async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Handles the /personas command. Lists all available personalities from the PERSONAS dictionary.
     """
     # Using MarkdownV2 for `code` blocks, which requires escaping special characters.
-    available_personas = "\n".join([f"- `{p}`" for p in PERSONAS.keys()])
+    # The '-' character MUST be escaped with a '\\' in Python f-strings.
+    available_personas = "\n".join([f"\\- `{p}`" for p in PERSONAS.keys()])
     message = (
         "Here are the personalities I can adopt:\n\n"
         f"{available_personas}\n\n"
@@ -98,7 +97,6 @@ async def set_personality_command(update: Update, context: ContextTypes.DEFAULT_
     """
     chat_id = update.effective_chat.id
     try:
-        # The persona name is the first argument after the command
         persona_name = context.args[0].lower()
         if persona_name in PERSONAS:
             user_states[chat_id] = {"persona": PERSONAS[persona_name]}
@@ -106,7 +104,6 @@ async def set_personality_command(update: Update, context: ContextTypes.DEFAULT_
         else:
             await update.message.reply_text("❌ I don't know that personality. Use the /personas command to see the correct names.")
     except (IndexError, ValueError):
-        # This error occurs if the user just types /set_personality without a name
         await update.message.reply_text("⚠️ Please provide a personality name.\n_Example: `/set_personality friend`_", parse_mode='Markdown')
 
 # --- CORE CHAT FUNCTIONALITY ---
@@ -118,29 +115,22 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id
     user_message = update.message.text
     
-    # Default to 'friend' persona if user state was somehow lost (e.g., after a bot restart)
     if chat_id not in user_states:
         user_states[chat_id] = {"persona": PERSONAS["friend"]}
         
     current_persona = user_states[chat_id]["persona"]
     
-    # Let the user know the bot is "thinking"
     await context.bot.send_chat_action(chat_id=chat_id, action='typing')
     
     try:
-        # Construct the full prompt, providing the AI with its instructions and the user's message
         full_prompt = f"SYSTEM INSTRUCTION: {current_persona}\n\nUSER: {user_message}\n\nAI:"
-        
-        # Send the prompt to the Gemini model and get the response
         response = model.generate_content(full_prompt)
         ai_response = response.text
         
     except Exception as e:
-        # If the AI fails for any reason, log the technical error and send a friendly message to the user.
         print(f"Error generating AI response for chat_id {chat_id}: {e}")
         ai_response = "I'm sorry, I'm having a little trouble thinking right now... please try again in a moment. 😔"
         
-    # Send the AI's final response back to the user in Telegram
     await update.message.reply_text(ai_response)
 
 # --- MAIN APPLICATION SETUP ---
@@ -151,25 +141,19 @@ def main() -> None:
     """
     print("Bot is starting up...")
 
-    # Basic check to ensure API keys are present before starting
     if not TELEGRAM_TOKEN or not model:
         print("FATAL: Telegram Token or Gemini Model not configured. Check environment variables. Bot cannot start.")
         return
 
-    # Create the Telegram Application object
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Register all the command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("personas", personas_command))
     application.add_handler(CommandHandler("set_personality", set_personality_command))
-
-    # Register the message handler for all non-command text
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
-    # Start the bot. It will run until you stop it manually (e.g., with Ctrl+C).
     print("Bot has started successfully and is now polling for updates.")
     application.run_polling()
     print("Bot has been stopped.")
