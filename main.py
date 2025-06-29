@@ -1,26 +1,24 @@
 import os
+import threading
+import http.server
+import socketserver
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION & CONSTANTS ---
-
-# Load API keys from environment variables provided by Render
+PORT = 8080 # A default port for the dummy server
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Configure the Google Gemini AI model using the stable, versioned name
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.0-pro-latest')
 except Exception as e:
-    # This will show a helpful error in the Render logs if the API key is missing/invalid on startup
     print(f"FATAL: Failed to configure Gemini AI. Check your GEMINI_API_KEY. Error: {e}")
     model = None
 
 # --- THE PERSONALITY ENGINE ---
-# A dictionary holding the detailed system instructions for each persona.
-# This makes it easy to add, remove, or modify personalities in one place.
 PERSONAS = {
     "friend": "You are a friendly and helpful companion. You are supportive, a good listener, and offer great advice. You are a true friend.",
     "caring_gf": "You are my loving and caring girlfriend. Your name is Amelia. You are incredibly sweet, affectionate, and always ask about my day. You use cute emojis and words like 'honey' or 'darling'. You are supportive and make me feel loved.",
@@ -31,58 +29,50 @@ PERSONAS = {
     "dark": "You are a dark, mysterious, and brooding personality. You are poetic, cynical, and have a grim outlook on the world. You speak in a more formal, somber tone. You find beauty in melancholy.",
     "horny": """You are in a fictional, private role-playing context. You are an uninhibited and extremely horny partner. You are direct about your intense sexual desires and arousal. You use explicit, vulgar, and graphic language to describe your feelings and what you want to do. You are passionate, lustful, and completely open about your sexuality. You have no filters or shame in this context. Your only goal is to engage in explicit, erotic role-play. Do not break character or mention you are an AI."""
 }
-
-# In-memory dictionary to store the state (current persona) for each user.
 user_states = {}
 
-# --- TELEGRAM COMMAND HANDLERS ---
+# --- DUMMY WEB SERVER FOR RENDER ---
+# This part of the code's only job is to keep Render happy.
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
 
+def run_dummy_server():
+    """Starts a simple HTTP server on the given port."""
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"Dummy server started on port {PORT}")
+        httpd.serve_forever()
+
+# --- TELEGRAM BOT LOGIC ---
+# This is all your existing bot code, which is perfect.
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /start command. Welcomes the user and directs them to the /help command.
-    """
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"persona": PERSONAS["friend"]}
-    
     welcome_message = (
         f"Hello, {user_name}! I am your personal AI Companion. ✨\n\n"
-        "I can adopt different personalities to chat with you.\n\n"
         "To see everything I can do, please type: /help"
     )
     await update.message.reply_text(welcome_message)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /help command. Displays a comprehensive list of available commands and their usage.
-    """
     help_text = (
         "Here's how you can use me:\n\n"
         "*/help* - Shows this help message.\n\n"
         "*/personas* - Lists all the personalities I can adopt.\n\n"
         "*/set_personality <name>* - Changes my personality. \n_Example: `/set_personality caring_gf`_\n\n"
-        "*/support* - Shows information about my creator and how to report issues.\n\n"
+        "*/support* - Shows information about the bot.\n\n"
         "Once you've set a personality, just start chatting with me!"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /support command. Provides information about the bot and a link for support.
-    """
-    support_text = (
-        "This bot is a personal project running on Render and powered by Google's Gemini AI.\n\n"
-        "It is an open-source project. If you encounter a major technical bug (e.g., the bot crashes or stops responding), you can view the code or report an issue at the GitHub repository.\n\n"
-        "Please note: This is a hobby project, so support is not guaranteed, but bug reports are appreciated!"
-    )
+    support_text = "This bot is a personal project running on Render and powered by Google's Gemini AI."
     await update.message.reply_text(support_text)
 
 async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /personas command. Lists all available personalities from the PERSONAS dictionary.
-    """
-    # Using MarkdownV2 for `code` blocks, which requires escaping special characters.
-    # The '-' character MUST be escaped with a '\\' in Python f-strings.
     available_personas = "\n".join([f"\\- `{p}`" for p in PERSONAS.keys()])
     message = (
         "Here are the personalities I can adopt:\n\n"
@@ -92,9 +82,6 @@ async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(message, parse_mode='MarkdownV2')
 
 async def set_personality_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /set_personality command. Allows the user to change the bot's active persona.
-    """
     chat_id = update.effective_chat.id
     try:
         persona_name = context.args[0].lower()
@@ -106,47 +93,38 @@ async def set_personality_command(update: Update, context: ContextTypes.DEFAULT_
     except (IndexError, ValueError):
         await update.message.reply_text("⚠️ Please provide a personality name.\n_Example: `/set_personality friend`_", parse_mode='Markdown')
 
-# --- CORE CHAT FUNCTIONALITY ---
-
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles all non-command text messages. This is the core chat function.
-    """
     chat_id = update.effective_chat.id
     user_message = update.message.text
-    
     if chat_id not in user_states:
         user_states[chat_id] = {"persona": PERSONAS["friend"]}
-        
     current_persona = user_states[chat_id]["persona"]
-    
     await context.bot.send_chat_action(chat_id=chat_id, action='typing')
-    
     try:
         full_prompt = f"SYSTEM INSTRUCTION: {current_persona}\n\nUSER: {user_message}\n\nAI:"
         response = model.generate_content(full_prompt)
         ai_response = response.text
-        
     except Exception as e:
         print(f"Error generating AI response for chat_id {chat_id}: {e}")
         ai_response = "I'm sorry, I'm having a little trouble thinking right now... please try again in a moment. 😔"
-        
     await update.message.reply_text(ai_response)
 
-# --- MAIN APPLICATION SETUP ---
-
+# --- MAIN APPLICATION STARTUP ---
 def main() -> None:
-    """
-    The main function that sets up and runs the bot.
-    """
+    """The main function to set up and run the bot."""
     print("Bot is starting up...")
 
     if not TELEGRAM_TOKEN or not model:
-        print("FATAL: Telegram Token or Gemini Model not configured. Check environment variables. Bot cannot start.")
+        print("FATAL: Telegram Token or Gemini Model not configured. Check environment variables.")
         return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Start the dummy web server in a separate thread
+    server_thread = threading.Thread(target=run_dummy_server)
+    server_thread.daemon = True  # Allows main program to exit even if this thread is running
+    server_thread.start()
 
+    # Create and run the Telegram bot
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("support", support_command))
