@@ -32,7 +32,6 @@ PERSONAS = {
 user_states = {}
 
 # --- DUMMY WEB SERVER FOR RENDER ---
-# This part of the code's only job is to keep Render happy.
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -46,7 +45,6 @@ def run_dummy_server():
         httpd.serve_forever()
 
 # --- TELEGRAM BOT LOGIC ---
-# This is all your existing bot code, which is perfect.
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     chat_id = update.effective_chat.id
@@ -74,10 +72,11 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     available_personas = "\n".join([f"\\- `{p}`" for p in PERSONAS.keys()])
+    # The period '.' at the end of the next line MUST be escaped with a '\\' for MarkdownV2
     message = (
         "Here are the personalities I can adopt:\n\n"
         f"{available_personas}\n\n"
-        "To switch, use the command `/set_personality <name>`."
+        "To switch, use the command `/set_personality <name>`\\."
     )
     await update.message.reply_text(message, parse_mode='MarkdownV2')
 
@@ -111,19 +110,16 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # --- MAIN APPLICATION STARTUP ---
 def main() -> None:
-    """The main function to set up and run the bot."""
     print("Bot is starting up...")
 
     if not TELEGRAM_TOKEN or not model:
         print("FATAL: Telegram Token or Gemini Model not configured. Check environment variables.")
         return
 
-    # Start the dummy web server in a separate thread
     server_thread = threading.Thread(target=run_dummy_server)
-    server_thread.daemon = True  # Allows main program to exit even if this thread is running
+    server_thread.daemon = True
     server_thread.start()
 
-    # Create and run the Telegram bot
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
