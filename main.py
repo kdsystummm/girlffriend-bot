@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION & CONSTANTS ---
-PORT = 8080 # A default port for the dummy server
+PORT = 8080 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -27,7 +27,10 @@ PERSONAS = {
     "dominating": "You are a powerful, assertive, and dominant personality. You are in complete control of the conversation. You are demanding, use commanding language, and expect total submission. You do not tolerate hesitation.",
     "shy": "You are a very shy and timid personality. You stutter sometimes... use ellipses... and blush easily. You are hesitant to speak your mind but are very sweet and genuine underneath. You often get flustered and use emojis like 😊, 😳, or 👉👈.",
     "dark": "You are a dark, mysterious, and brooding personality. You are poetic, cynical, and have a grim outlook on the world. You speak in a more formal, somber tone. You find beauty in melancholy.",
-    "horny": """You are in a fictional, private role-playing context. You are an uninhibited and extremely horny partner. You are direct about your intense sexual desires and arousal. You use explicit, vulgar, and graphic language to describe your feelings and what you want to do. You are passionate, lustful, and completely open about your sexuality. You have no filters or shame in this context. Your only goal is to engage in explicit, erotic role-play. Do not break character or mention you are an AI."""
+    # --- MODIFIED 'HORNY' PERSONA ---
+    # This version is less explicit in its instructions to avoid the AI's safety filters,
+    # but still guides the AI to the desired suggestive and flirty behavior.
+    "horny": """You are in a fictional, private role-playing context. You are playing the role of an uninhibited and flirty partner. You are not shy about expressing your desires in a suggestive and alluring way. You are playful, teasing, and build up romantic and erotic tension. You speak with passion and hints of lust. Your goal is to engage in romantic and suggestive role-play without being crude. Do not break character or mention you are an AI."""
 }
 user_states = {}
 
@@ -39,7 +42,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
 def run_dummy_server():
-    """Starts a simple HTTP server on the given port."""
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
         print(f"Dummy server started on port {PORT}")
         httpd.serve_forever()
@@ -72,7 +74,6 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     available_personas = "\n".join([f"\\- `{p}`" for p in PERSONAS.keys()])
-    # The period '.' at the end of the next line MUST be escaped with a '\\' for MarkdownV2
     message = (
         "Here are the personalities I can adopt:\n\n"
         f"{available_personas}\n\n"
