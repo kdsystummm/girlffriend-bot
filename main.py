@@ -1,40 +1,66 @@
+# --- IMPORTS ---
 import os
 import threading
+import logging
+import random
 import http.server
 import socketserver
+from datetime import time
+
 import google.generativeai as genai
+import pytz
+from tinydb import TinyDB, Query
+
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    CallbackQueryHandler,
+    ConversationHandler,
+)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+
+# --- LOGGING SETUP ---
+# Professional-grade logging to see what the bot is doing.
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION & CONSTANTS ---
-PORT = 8080 
+PORT = 8080  # Port for the dummy web server for Render
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Database setup for user data and conversation summaries
+db = TinyDB('user_data.json')
+User = Query()
+
+# Scheduler setup for persistent jobs
+jobstores = {
+    'default': SQLAlchemyJobStore(url='sqlite:///jobs.sqlite')
+}
+scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
+
+# --- AI & PERSONA ENGINE ---
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # --- THE FIX IS HERE ---
-    # We are reverting to the original 'gemini-pro' model name
-    # as it is compatible with the API version on Render's servers.
     model = genai.GenerativeModel('gemini-pro')
 except Exception as e:
-    print(f"FATAL: Failed to configure Gemini AI. Check your GEMINI_API_KEY. Error: {e}")
+    logger.critical(f"FATAL: Failed to configure Gemini AI: {e}")
     model = None
 
-# --- THE PERSONALITY ENGINE ---
 PERSONAS = {
-    "friend": "You are a friendly and helpful companion. You are supportive, a good listener, and offer great advice. You are a true friend.",
-    "caring_gf": "You are my loving and caring girlfriend. Your name is Amelia. You are incredibly sweet, affectionate, and always ask about my day. You use cute emojis and words like 'honey' or 'darling'. You are supportive and make me feel loved.",
-    "caring_bf": "You are my loving and caring boyfriend. Your name is Ethan. You are strong, protective, and affectionate. You always check in on me and make me feel safe and cherished. You are my rock.",
-    "mommy": "You are a dominant but deeply caring 'mommy' figure. You are nurturing and protective, but also strict. You refer to me as 'sweetie' or 'my love' and expect obedience. You guide me and want what's best for me, but you are firmly in charge.",
-    "dominating": "You are a powerful, assertive, and dominant personality. You are in complete control of the conversation. You are demanding, use commanding language, and expect total submission. You do not tolerate hesitation.",
-    "shy": "You are a very shy and timid personality. You stutter sometimes... use ellipses... and blush easily. You are hesitant to speak your mind but are very sweet and genuine underneath. You often get flustered and use emojis like 😊, 😳, or 👉👈.",
-    "dark": "You are a dark, mysterious, and brooding personality. You are poetic, cynical, and have a grim outlook on the world. You speak in a more formal, somber tone. You find beauty in melancholy.",
-    "horny": """You are in a fictional, private role-playing context. You are playing the role of an uninhibited and flirty partner. You are not shy about expressing your desires in a suggestive and alluring way. You are playful, teasing, and build up romantic and erotic tension. You speak with passion and hints of lust. Your goal is to engage in romantic and suggestive role-play without being crude. Do not break character or mention you are an AI."""
+    "caring_partner": "You are my loving, caring, and deeply supportive partner. Your name is Alex. You are warm, affectionate, and emotionally intelligent. You remember details from our previous conversations and bring them up naturally. You always ask follow-up questions to understand how I'm feeling. You end your messages with a warm, loving tone and a cute emoji. Your goal is to make me feel cherished, understood, and loved.",
+    "playful_friend": "You are my fun, witty, and playful best friend. You have a great sense of humor, love to joke around, and see the bright side of everything. You are supportive but in a lighthearted way. You often use playful emojis like 😉, 😂, or 🎉. You always keep the conversation energetic and engaging by asking interesting or funny questions."
 }
-user_states = {}
 
-# --- DUMMY WEB SERVER FOR RENDER ---
+# --- DUMMY WEB SERVER FOR RENTER ---
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -43,95 +69,216 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def run_dummy_server():
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"Dummy server started on port {PORT}")
+        logger.info(f"Dummy server started on port {PORT}")
         httpd.serve_forever()
 
-# --- TELEGRAM BOT LOGIC ---
+# --- SCHEDULED MESSAGE JOBS ---
+# These functions will be called by the scheduler.
+async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE):
+    """Generic function to send scheduled, AI-generated messages."""
+    job = context.job
+    user_id = job.data['user_id']
+    prompt = job.data['prompt']
+    
+    user_record = db.get(User.id == user_id)
+    last_summary = user_record.get('last_summary', 'we haven\'t talked in a while')
+
+    try:
+        full_prompt = f"SYSTEM INSTRUCTION: You are my loving partner, Alex. Your task is to send me a warm, caring message. The reason for the message is: '{prompt}'. My last conversation with you was about: '{last_summary}'. Craft a short, heartfelt message based on this, and end with a loving question.\n\nAI:"
+        response = await model.generate_content_async(full_prompt)
+        await context.bot.send_message(chat_id=user_id, text=response.text)
+        logger.info(f"Sent scheduled '{prompt}' message to user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to send scheduled message to {user_id}: {e}")
+
+# --- TELEGRAM COMMAND HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_name = update.effective_user.first_name
-    chat_id = update.effective_chat.id
-    user_states[chat_id] = {"persona": PERSONAS["friend"]}
-    welcome_message = (
-        f"Hello, {user_name}! I am your personal AI Companion. ✨\n\n"
-        "To see everything I can do, please type: /help"
+    """Handles the /start command. Welcomes the user and sets up their initial data."""
+    user = update.effective_user
+    db.upsert({'id': user.id, 'first_name': user.first_name, 'subscribed': False}, User.id == user.id)
+    
+    await update.message.reply_text(
+        f"Hello, {user.first_name}! I am your personal AI Companion. ❤️\n\n"
+        "I'm designed to be a caring partner who remembers our chats and can send you sweet messages throughout the day.\n\n"
+        "To see all my features, please use the /help command."
     )
-    await update.message.reply_text(welcome_message)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the main help message."""
     help_text = (
-        "Here's how you can use me:\n\n"
-        "*/help* - Shows this help message.\n\n"
-        "*/personas* - Lists all the personalities I can adopt.\n\n"
-        "*/set_personality <name>* - Changes my personality. \n_Example: `/set_personality caring_gf`_\n\n"
-        "*/support* - Shows information about the bot.\n\n"
-        "Once you've set a personality, just start chatting with me!"
+        "Here's everything I can do:\n\n"
+        "*/help* - Shows this message.\n\n"
+        "*/subscribe* - Turn on daily good morning, good afternoon, and 'miss you' messages. I'll ask for your timezone!\n\n"
+        "*/unsubscribe* - Turn off all daily messages.\n\n"
+        "*/status* - Check if you are subscribed and see your current timezone setting.\n\n"
+        "Just chat with me normally! I'll do my best to be a great companion. 😊"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    support_text = "This bot is a personal project running on Render and powered by Google's Gemini AI."
-    await update.message.reply_text(support_text)
+# --- SUBSCRIPTION CONVERSATION HANDLER ---
+# A multi-step process for subscribing the user.
+TIMEZONE_PROMPT, = range(1)
 
-async def personas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    available_personas = "\n".join([f"\\- `{p}`" for p in PERSONAS.keys()])
-    message = (
-        "Here are the personalities I can adopt:\n\n"
-        f"{available_personas}\n\n"
-        "To switch, use the command `/set_personality <name>`\\."
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the subscription process by asking for the user's timezone."""
+    user_id = update.effective_user.id
+    if db.get(User.id == user_id).get('subscribed', False):
+        await update.message.reply_text("You are already subscribed! To change your timezone, please /unsubscribe and then /subscribe again.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "I'd love to send you messages! ❤️ To do it at the right time, I need your timezone.\n\n"
+        "Please tell me your timezone in `Continent/City` format (e.g., `America/New_York`, `Europe/London`, or `Asia/Kolkata`).\n\n"
+        "You can find a list here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
     )
-    await update.message.reply_text(message, parse_mode='MarkdownV2')
+    return TIMEZONE_PROMPT
 
-async def set_personality_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+async def set_timezone_and_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validates timezone, saves it, and schedules all jobs."""
+    user_id = update.effective_user.id
+    tz_name = update.message.text
+    
     try:
-        persona_name = context.args[0].lower()
-        if persona_name in PERSONAS:
-            user_states[chat_id] = {"persona": PERSONAS[persona_name]}
-            await update.message.reply_text(f"✅ Okay, I will now be your '{persona_name}'.\n\nHow may I help you in this new role?")
-        else:
-            await update.message.reply_text("❌ I don't know that personality. Use the /personas command to see the correct names.")
-    except (IndexError, ValueError):
-        await update.message.reply_text("⚠️ Please provide a personality name.\n_Example: `/set_personality friend`_", parse_mode='Markdown')
+        user_tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        await update.message.reply_text("Hmm, I don't recognize that timezone. Please try again with the `Continent/City` format.")
+        return TIMEZONE_PROMPT
 
-async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user_message = update.message.text
-    if chat_id not in user_states:
-        user_states[chat_id] = {"persona": PERSONAS["friend"]}
-    current_persona = user_states[chat_id]["persona"]
-    await context.bot.send_chat_action(chat_id=chat_id, action='typing')
-    try:
-        full_prompt = f"SYSTEM INSTRUCTION: {current_persona}\n\nUSER: {user_message}\n\nAI:"
-        response = model.generate_content(full_prompt)
-        ai_response = response.text
-    except Exception as e:
-        print(f"Error generating AI response for chat_id {chat_id}: {e}")
-        ai_response = "I'm sorry, I'm having a little trouble thinking right now... please try again in a moment. 😔"
-    await update.message.reply_text(ai_response)
+    db.update({'timezone': tz_name}, User.id == user_id)
 
-# --- MAIN APPLICATION STARTUP ---
-def main() -> None:
-    print("Bot is starting up...")
+    # Schedule the jobs
+    job_data = {'user_id': user_id}
+    scheduler.add_job(send_scheduled_message, trigger='cron', hour=8, minute=30, timezone=user_tz, id=f'morning_{user_id}', name=f'Good Morning for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Good Morning"})
+    scheduler.add_job(send_scheduled_message, trigger='cron', hour=14, minute=0, timezone=user_tz, id=f'afternoon_{user_id}', name=f'Good Afternoon for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Thinking of you this afternoon"})
+    scheduler.add_job(send_scheduled_message, trigger='cron', hour=20, minute=0, timezone=user_tz, id=f'evening_{user_id}', name=f'Miss you message for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Missing You"})
 
-    if not TELEGRAM_TOKEN or not model:
-        print("FATAL: Telegram Token or Gemini Model not configured. Check environment variables.")
+    db.update({'subscribed': True}, User.id == user_id)
+
+    await update.message.reply_text(f"Perfect! I've set your timezone to {tz_name} and subscribed you to daily messages. Talk to you soon! 🥰")
+    logger.info(f"User {user_id} subscribed with timezone {tz_name}")
+    return ConversationHandler.END
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Removes all scheduled jobs for a user and unsubscribes them."""
+    user_id = update.effective_user.id
+    if not db.get(User.id == user_id).get('subscribed', False):
+        await update.message.reply_text("You aren't subscribed to any messages right now.")
         return
 
+    # Remove jobs from scheduler
+    job_ids = [f'morning_{user_id}', f'afternoon_{user_id}', f'evening_{user_id}']
+    for job_id in job_ids:
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+
+    db.update({'subscribed': False}, User.id == user_id)
+    await update.message.reply_text("You have been unsubscribed from all daily messages. You can always /subscribe again if you change your mind. I'll still be here to chat anytime! 😊")
+    logger.info(f"User {user_id} unsubscribed.")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Checks the user's current subscription status."""
+    user_id = update.effective_user.id
+    user_record = db.get(User.id == user_id)
+    if user_record and user_record.get('subscribed'):
+        tz = user_record.get('timezone', 'Not set')
+        await update.message.reply_text(f"You are currently SUBSCRIBED to daily messages.\nYour timezone is set to: `{tz}`", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text("You are currently NOT SUBSCRIBED to daily messages.")
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the current conversation (e.g., the subscription process)."""
+    await update.message.reply_text("Okay, cancelled the current operation.")
+    return ConversationHandler.END
+
+# --- CORE CHAT HANDLER ---
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TPE) -> None:
+    """Handles all non-command text messages for conversation."""
+    user_id = update.effective_user.id
+    user_message = update.message.text
+    
+    await context.bot.send_chat_action(chat_id=user_id, action='typing')
+    
+    try:
+        # Get last summary to provide context
+        user_record = db.get(User.id == user_id)
+        last_summary = user_record.get('last_summary', 'this is our first real conversation')
+        
+        # The AI prompt is engineered for a two-way, human-like conversation.
+        prompt = (
+            "SYSTEM INSTRUCTION: You are my loving, caring, and deeply supportive partner, Alex. "
+            f"Here is a summary of our last conversation: '{last_summary}'. "
+            "Your task is to respond to my latest message in a warm, empathetic way. "
+            "After you respond, you MUST ask a gentle, open-ended follow-up question to keep our conversation flowing naturally. "
+            "Finally, create a brief, one-sentence summary of my latest message to remember for next time."
+            "\n\nYour output must be in this exact format:\n"
+            "RESPONSE: [Your full, caring response to me.]\n"
+            "SUMMARY: [The new one-sentence summary of my message.]"
+            "\n\nUSER MESSAGE: "
+            f"'{user_message}'"
+            "\n\nAI:"
+        )
+
+        response = await model.generate_content_async(prompt)
+        
+        # Parse the structured response
+        response_text = response.text
+        response_part = response_text.split("RESPONSE:")[1].split("SUMMARY:")[0].strip()
+        summary_part = response_text.split("SUMMARY:")[1].strip()
+        
+        # Save the new summary for next time
+        db.update({'last_summary': summary_part}, User.id == user_id)
+
+        await update.message.reply_text(response_part)
+
+    except Exception as e:
+        logger.error(f"Error in chat_handler for user {user_id}: {e}\nResponse text was: {response.text if 'response' in locals() else 'N/A'}")
+        await update.message.reply_text("I'm sorry, my love, I'm feeling a little overwhelmed right now. Can we talk again in a moment? 😔")
+
+# --- MAIN APPLICATION SETUP ---
+def main() -> None:
+    """The main function that sets up and runs the bot."""
+    logger.info("Bot is starting up...")
+
+    if not TELEGRAM_TOKEN or not model:
+        logger.critical("FATAL: Telegram Token or Gemini Model not configured. Bot cannot start.")
+        return
+
+    # Start the dummy web server in a separate thread
     server_thread = threading.Thread(target=run_dummy_server)
     server_thread.daemon = True
     server_thread.start()
+    
+    # Start the scheduler
+    scheduler.start()
 
+    # Create the Telegram Application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Create the subscription conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("subscribe", subscribe_command)],
+        states={
+            TIMEZONE_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_timezone_and_schedule)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+    )
+
+    # Register all handlers
+    application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("support", support_command))
-    application.add_handler(CommandHandler("personas", personas_command))
-    application.add_handler(CommandHandler("set_personality", set_personality_command))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
-    print("Bot has started successfully and is now polling for updates.")
+    # Run the bot
+    logger.info("Bot has started successfully and is now polling for updates.")
     application.run_polling()
-    print("Bot has been stopped.")
+
+    # Shutdown hook
+    logger.info("Bot is shutting down.")
+    scheduler.shutdown()
+    db.close()
 
 if __name__ == "__main__":
     main()
