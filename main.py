@@ -5,6 +5,7 @@ import logging
 import http.server
 import socketserver
 import asyncio
+from datetime import time
 
 import google.generativeai as genai
 import pytz
@@ -21,52 +22,12 @@ from telegram.ext import (
     PicklePersistence,
     CallbackQueryHandler
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from datetime import time
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-
-# --- PARANOID ENVIRONMENT VARIABLE CHECK ---
-def check_environment_variables():
-    """Checks all required environment variables and logs their status."""
-    logger.info("--- Checking Environment Variables ---")
-    
-    telegram_token = os.getenv("TELEGRAM_TOKEN")
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    admin_user_id = os.getenv("ADMIN_USER_ID")
-    
-    missing_vars = []
-    
-    if telegram_token:
-        logger.info("✅ TELEGRAM_TOKEN found.")
-    else:
-        logger.critical("❌ TELEGRAM_TOKEN is MISSING.")
-        missing_vars.append("TELEGRAM_TOKEN")
-        
-    if gemini_api_key:
-        logger.info("✅ GEMINI_API_KEY found.")
-    else:
-        logger.critical("❌ GEMINI_API_KEY is MISSING.")
-        missing_vars.append("GEMINI_API_KEY")
-
-    if admin_user_id:
-        logger.info("✅ ADMIN_USER_ID found.")
-    else:
-        logger.critical("❌ ADMIN_USER_ID is MISSING.")
-        missing_vars.append("ADMIN_USER_ID")
-
-    if missing_vars:
-        logger.critical(f"FATAL: The following required environment variables are missing: {', '.join(missing_vars)}")
-        return False
-    
-    logger.info("--- All environment variables found. Proceeding with startup. ---")
-    return True
 
 # --- CONFIGURATION & CONSTANTS ---
 PORT = 8080
@@ -76,8 +37,6 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 
 db = TinyDB('user_data.json')
 User = Query()
-
-scheduler = AsyncIOScheduler(timezone="UTC")
 
 # --- AI & PERSONA ENGINE ---
 try:
@@ -102,8 +61,21 @@ def run_dummy_server():
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
         logger.info(f"Dummy server started on port {PORT}"); httpd.serve_forever()
 
-# --- ALL BOT FUNCTIONS (UNCHANGED, THEY ARE CORRECT) ---
+# --- SCHEDULED MESSAGE JOBS ---
+async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job; user_id = job.data['user_id']; prompt = job.data['prompt']
+    user_record = db.get(User.id == user_id)
+    if not user_record: return
+    last_summary = user_record.get('last_summary', 'we haven\'t talked in a while')
+    try:
+        full_prompt = f"SYSTEM INSTRUCTION: You are my loving partner, Alex. Your task is to send me a warm, caring message. The reason is: '{prompt}'. My last conversation was about: '{last_summary}'. Craft a short, heartfelt message and ask a loving question.\n\nAI:"
+        response = await model.generate_content_async(full_prompt)
+        await context.bot.send_message(chat_id=user_id, text=response.text)
+        logger.info(f"Sent scheduled '{prompt}' message to user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to send scheduled message to {user_id}: {e}")
 
+# --- TELEGRAM COMMAND HANDLERS ---
 def get_user_settings(user_id: int) -> dict:
     user_record = db.get(User.id == user_id)
     if not user_record:
@@ -154,9 +126,11 @@ async def set_timezone_and_schedule(update: Update, context: ContextTypes.DEFAUL
     except pytz.UnknownTimeZoneError: await update.message.reply_text("I don't recognize that timezone. Please try again."); return TIMEZONE_PROMPT
     db.update({'timezone': tz_name}, User.id == user_id)
     job_data = {'user_id': user_id}
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=8, minute=30, timezone=user_tz, id=f'morning_{user_id}', replace_existing=True, data={**job_data, 'prompt': "Good Morning"})
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=14, timezone=user_tz, id=f'afternoon_{user_id}', replace_existing=True, data={**job_data, 'prompt': "Thinking of you this afternoon"})
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=20, timezone=user_tz, id=f'evening_{user_id}', replace_existing=True, data={**job_data, 'prompt': "Missing You"})
+    # --- THIS IS THE FIX ---
+    # We now use context.job_queue which is the bot's internal scheduler.
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=8, minute=30, tzinfo=user_tz), name=f'morning_{user_id}', data=job_data, job_kwargs={'misfire_grace_time': 60})
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=14, tzinfo=user_tz), name=f'afternoon_{user_id}', data=job_data, job_kwargs={'misfire_grace_time': 60})
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=20, tzinfo=user_tz), name=f'evening_{user_id}', data=job_data, job_kwargs={'misfire_grace_time': 60})
     db.update({'subscribed': True}, User.id == user_id)
     await update.message.reply_text(f"Perfect! I've set your timezone to {tz_name} and subscribed you to daily messages. Talk to you soon! 🥰"); return ConversationHandler.END
 
@@ -164,7 +138,7 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     if not db.get(User.id == user_id).get('subscribed', False): await update.message.reply_text("You aren't subscribed."); return
     for name in [f'morning_{user_id}', f'afternoon_{user_id}', f'evening_{user_id}']:
-        if scheduler.get_job(name): scheduler.remove_job(name)
+        current_jobs = context.job_queue.get_jobs_by_name(name); [job.schedule_removal() for job in current_jobs]
     db.update({'subscribed': False}, User.id == user_id); await update.message.reply_text("You have been unsubscribed from all daily messages.")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,7 +188,8 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # --- MAIN APPLICATION SETUP ---
 def main() -> None:
     """The main function that sets up and runs the bot."""
-    if not check_environment_variables():
+    if not all([os.getenv("TELEGRAM_TOKEN"), os.getenv("GEMINI_API_KEY"), os.getenv("ADMIN_USER_ID")]):
+        logger.critical("FATAL: One or more required environment variables are missing. Bot cannot start.")
         return
 
     logger.info("Starting up Bot...")
@@ -237,12 +212,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
-    if not scheduler.running:
-        scheduler.start()
-        logger.info("Scheduler started.")
-
     logger.info("Application configured. Starting to poll for updates.")
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
