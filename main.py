@@ -45,7 +45,7 @@ scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
 # --- AI & PERSONA ENGINE ---
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 except Exception as e:
     logger.critical(f"FATAL: Failed to configure Gemini AI: {e}")
     model = None
