@@ -2,10 +2,8 @@
 import os
 import threading
 import logging
-import random
 import http.server
 import socketserver
-from datetime import time
 
 import google.generativeai as genai
 import pytz
@@ -18,7 +16,6 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    CallbackQueryHandler,
     ConversationHandler,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -57,7 +54,7 @@ PERSONAS = {
     "playful_friend": "You are my fun, witty, and playful best friend. You have a great sense of humor, love to joke around, and see the bright side of everything. You are supportive but in a lighthearted way. You often use playful emojis like 😉, 😂, or 🎉. You always keep the conversation energetic and engaging by asking interesting or funny questions."
 }
 
-# --- DUMMY WEB SERVER FOR RENTER ---
+# --- DUMMY WEB SERVER FOR RENDER ---
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -137,9 +134,10 @@ async def set_timezone_and_schedule(update: Update, context: ContextTypes.DEFAUL
     db.update({'timezone': tz_name}, User.id == user_id)
 
     job_data = {'user_id': user_id}
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=8, minute=30, timezone=user_tz, id=f'morning_{user_id}', name=f'Good Morning for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Good Morning"})
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=14, minute=0, timezone=user_tz, id=f'afternoon_{user_id}', name=f'Good Afternoon for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Thinking of you this afternoon"})
-    scheduler.add_job(send_scheduled_message, trigger='cron', hour=20, minute=0, timezone=user_tz, id=f'evening_{user_id}', name=f'Miss you message for {user_id}', replace_existing=True, data={**job_data, 'prompt': "Missing You"})
+    # We now access the scheduler from the application context
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=8, minute=30, tzinfo=user_tz), name=f'morning_{user_id}', data={**job_data, 'prompt': "Good Morning"})
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=14, minute=0, tzinfo=user_tz), name=f'afternoon_{user_id}', data={**job_data, 'prompt': "Thinking of you this afternoon"})
+    context.job_queue.run_daily(send_scheduled_message, time=time(hour=20, minute=0, tzinfo=user_tz), name=f'evening_{user_id}', data={**job_data, 'prompt': "Missing You"})
 
     db.update({'subscribed': True}, User.id == user_id)
 
@@ -153,10 +151,13 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("You aren't subscribed to any messages right now.")
         return
 
-    job_ids = [f'morning_{user_id}', f'afternoon_{user_id}', f'evening_{user_id}']
-    for job_id in job_ids:
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
+    # Remove jobs from the application's job queue
+    for job in context.job_queue.get_jobs_by_name(f'morning_{user_id}'):
+        job.schedule_removal()
+    for job in context.job_queue.get_jobs_by_name(f'afternoon_{user_id}'):
+        job.schedule_removal()
+    for job in context.job_queue.get_jobs_by_name(f'evening_{user_id}'):
+        job.schedule_removal()
 
     db.update({'subscribed': False}, User.id == user_id)
     await update.message.reply_text("You have been unsubscribed from all daily messages. You can always /subscribe again if you change your mind. I'll still be here to chat anytime! 😊")
@@ -176,9 +177,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 # --- CORE CHAT HANDLER ---
-# The typo was here. Changed 'DEFAULT_TPE' to 'DEFAULT_TYPE'
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles all non-command text messages for conversation."""
     user_id = update.effective_user.id
     user_message = update.message.text
     
@@ -217,6 +216,17 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("I'm sorry, my love, I'm feeling a little overwhelmed right now. Can we talk again in a moment? 😔")
 
 # --- MAIN APPLICATION SETUP ---
+async def post_init(application: Application) -> None:
+    """Function to start the scheduler after the bot is initialized."""
+    logger.info("Bot initialized. Starting scheduler.")
+    scheduler.start()
+
+async def post_shutdown(application: Application) -> None:
+    """Function to shut down the scheduler gracefully."""
+    logger.info("Bot is shutting down. Shutting down scheduler.")
+    scheduler.shutdown()
+    db.close()
+
 def main() -> None:
     """The main function that sets up and runs the bot."""
     logger.info("Bot is starting up...")
@@ -225,22 +235,27 @@ def main() -> None:
         logger.critical("FATAL: Telegram Token or Gemini Model not configured. Bot cannot start.")
         return
 
+    # Start the dummy web server in a separate thread
     server_thread = threading.Thread(target=run_dummy_server)
     server_thread.daemon = True
     server_thread.start()
     
-    scheduler.start()
+    # Create the Telegram Application, now with post_init and post_shutdown hooks
+    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
+    # Create the subscription conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("subscribe", subscribe_command)],
         states={
             TIMEZONE_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_timezone_and_schedule)],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
+        # We also need to add the job_queue to the persistence context
+        persistent=True,
+        name="subscription_handler"
     )
 
+    # Register all handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -248,12 +263,11 @@ def main() -> None:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
-    logger.info("Bot has started successfully and is now polling for updates.")
+    # Run the bot
+    logger.info("Application configured. Starting to poll for updates.")
+    # The application itself now manages the event loop for everything.
     application.run_polling()
 
-    logger.info("Bot is shutting down.")
-    scheduler.shutdown()
-    db.close()
 
 if __name__ == "__main__":
     main()
