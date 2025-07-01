@@ -17,10 +17,11 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
-    PicklePersistence, # Import the persistence object
+    PicklePersistence,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from datetime import time
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -45,6 +46,7 @@ scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
 # --- AI & PERSONA ENGINE ---
 try:
     genai.configure(api_key=GEMINI_API_KEY)
+    # Using the newest, fastest model compatible with the updated library
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
 except Exception as e:
     logger.critical(f"FATAL: Failed to configure Gemini AI: {e}")
@@ -63,10 +65,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
 def run_dummy_server():
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        # --- THE FIX IS HERE (For OSError) ---
-        # This allows the server to reuse the port quickly after a restart.
-        httpd.allow_reuse_address = True
         logger.info(f"Dummy server started on port {PORT}")
         httpd.serve_forever()
 
@@ -77,6 +77,11 @@ async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE):
     prompt = job.data['prompt']
     
     user_record = db.get(User.id == user_id)
+    # This check prevents errors if user data is somehow missing
+    if not user_record:
+        logger.warning(f"Could not find user {user_id} for scheduled message. Skipping.")
+        return
+    
     last_summary = user_record.get('last_summary', 'we haven\'t talked in a while')
 
     try:
@@ -154,16 +159,12 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("You aren't subscribed to any messages right now.")
         return
 
-    # Use the job names to remove them
     for job in context.job_queue.get_jobs_by_name(f'morning_{user_id}'):
         job.schedule_removal()
-        logger.info(f"Removed job: {job.name}")
     for job in context.job_queue.get_jobs_by_name(f'afternoon_{user_id}'):
         job.schedule_removal()
-        logger.info(f"Removed job: {job.name}")
     for job in context.job_queue.get_jobs_by_name(f'evening_{user_id}'):
         job.schedule_removal()
-        logger.info(f"Removed job: {job.name}")
 
     db.update({'subscribed': False}, User.id == user_id)
     await update.message.reply_text("You have been unsubscribed from all daily messages. You can always /subscribe again if you change your mind. I'll still be here to chat anytime! 😊")
@@ -190,7 +191,14 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_chat_action(chat_id=user_id, action='typing')
     
     try:
+        # --- THE FIX IS HERE ---
+        # Get user record, and if it doesn't exist, create it on the fly.
         user_record = db.get(User.id == user_id)
+        if not user_record:
+            logger.info(f"User {user_id} not found in DB. Creating new record.")
+            db.upsert({'id': user_id, 'first_name': update.effective_user.first_name, 'subscribed': False}, User.id == user_id)
+            user_record = db.get(User.id == user_id) # Re-fetch the new record
+
         last_summary = user_record.get('last_summary', 'this is our first real conversation')
         
         prompt = (
@@ -210,12 +218,16 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         response = await model.generate_content_async(prompt)
         
         response_text = response.text
-        response_part = response_text.split("RESPONSE:")[1].split("SUMMARY:")[0].strip()
-        summary_part = response_text.split("SUMMARY:")[1].strip()
-        
-        db.update({'last_summary': summary_part}, User.id == user_id)
-
-        await update.message.reply_text(response_part)
+        # Defensive parsing to prevent crashes if the AI doesn't follow the format
+        if "RESPONSE:" in response_text and "SUMMARY:" in response_text:
+            response_part = response_text.split("RESPONSE:")[1].split("SUMMARY:")[0].strip()
+            summary_part = response_text.split("SUMMARY:")[1].strip()
+            db.update({'last_summary': summary_part}, User.id == user_id)
+            await update.message.reply_text(response_part)
+        else:
+            # If AI messes up the format, just send the whole text and log a warning
+            logger.warning(f"AI response for user {user_id} did not match expected format. Raw text: {response_text}")
+            await update.message.reply_text(response_text)
 
     except Exception as e:
         logger.error(f"Error in chat_handler for user {user_id}: {e}\nResponse text was: {response.text if 'response' in locals() else 'N/A'}")
@@ -228,7 +240,6 @@ async def post_init(application: Application) -> None:
 
 async def post_shutdown(application: Application) -> None:
     logger.info("Bot is shutting down. Shutting down scheduler.")
-    scheduler.shutdown()
     db.close()
 
 def main() -> None:
@@ -242,14 +253,10 @@ def main() -> None:
     server_thread.daemon = True
     server_thread.start()
     
-    # --- THE FIX IS HERE (For ValueError) ---
-    # Create the persistence object
     persistence = PicklePersistence(filepath="bot_persistence.pickle")
     
-    # Build the application with persistence
     application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Create the subscription conversation handler, now that persistence is enabled
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("subscribe", subscribe_command)],
         states={
@@ -260,7 +267,6 @@ def main() -> None:
         name="subscription_handler"
     )
 
-    # Register all handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
