@@ -17,6 +17,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
+    PicklePersistence, # Import the persistence object
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -63,6 +64,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def run_dummy_server():
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        # --- THE FIX IS HERE (For OSError) ---
+        # This allows the server to reuse the port quickly after a restart.
+        httpd.allow_reuse_address = True
         logger.info(f"Dummy server started on port {PORT}")
         httpd.serve_forever()
 
@@ -134,7 +138,6 @@ async def set_timezone_and_schedule(update: Update, context: ContextTypes.DEFAUL
     db.update({'timezone': tz_name}, User.id == user_id)
 
     job_data = {'user_id': user_id}
-    # We now access the scheduler from the application context
     context.job_queue.run_daily(send_scheduled_message, time=time(hour=8, minute=30, tzinfo=user_tz), name=f'morning_{user_id}', data={**job_data, 'prompt': "Good Morning"})
     context.job_queue.run_daily(send_scheduled_message, time=time(hour=14, minute=0, tzinfo=user_tz), name=f'afternoon_{user_id}', data={**job_data, 'prompt': "Thinking of you this afternoon"})
     context.job_queue.run_daily(send_scheduled_message, time=time(hour=20, minute=0, tzinfo=user_tz), name=f'evening_{user_id}', data={**job_data, 'prompt': "Missing You"})
@@ -151,13 +154,16 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("You aren't subscribed to any messages right now.")
         return
 
-    # Remove jobs from the application's job queue
+    # Use the job names to remove them
     for job in context.job_queue.get_jobs_by_name(f'morning_{user_id}'):
         job.schedule_removal()
+        logger.info(f"Removed job: {job.name}")
     for job in context.job_queue.get_jobs_by_name(f'afternoon_{user_id}'):
         job.schedule_removal()
+        logger.info(f"Removed job: {job.name}")
     for job in context.job_queue.get_jobs_by_name(f'evening_{user_id}'):
         job.schedule_removal()
+        logger.info(f"Removed job: {job.name}")
 
     db.update({'subscribed': False}, User.id == user_id)
     await update.message.reply_text("You have been unsubscribed from all daily messages. You can always /subscribe again if you change your mind. I'll still be here to chat anytime! 😊")
@@ -217,40 +223,39 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # --- MAIN APPLICATION SETUP ---
 async def post_init(application: Application) -> None:
-    """Function to start the scheduler after the bot is initialized."""
     logger.info("Bot initialized. Starting scheduler.")
     scheduler.start()
 
 async def post_shutdown(application: Application) -> None:
-    """Function to shut down the scheduler gracefully."""
     logger.info("Bot is shutting down. Shutting down scheduler.")
     scheduler.shutdown()
     db.close()
 
 def main() -> None:
-    """The main function that sets up and runs the bot."""
     logger.info("Bot is starting up...")
 
     if not TELEGRAM_TOKEN or not model:
         logger.critical("FATAL: Telegram Token or Gemini Model not configured. Bot cannot start.")
         return
 
-    # Start the dummy web server in a separate thread
     server_thread = threading.Thread(target=run_dummy_server)
     server_thread.daemon = True
     server_thread.start()
     
-    # Create the Telegram Application, now with post_init and post_shutdown hooks
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    # --- THE FIX IS HERE (For ValueError) ---
+    # Create the persistence object
+    persistence = PicklePersistence(filepath="bot_persistence.pickle")
+    
+    # Build the application with persistence
+    application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Create the subscription conversation handler
+    # Create the subscription conversation handler, now that persistence is enabled
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("subscribe", subscribe_command)],
         states={
             TIMEZONE_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_timezone_and_schedule)],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
-        # We also need to add the job_queue to the persistence context
         persistent=True,
         name="subscription_handler"
     )
@@ -263,9 +268,7 @@ def main() -> None:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
-    # Run the bot
     logger.info("Application configured. Starting to poll for updates.")
-    # The application itself now manages the event loop for everything.
     application.run_polling()
 
 
