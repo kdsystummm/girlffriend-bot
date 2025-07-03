@@ -11,7 +11,7 @@ import google.generativeai as genai
 import pytz
 from tinydb import TinyDB, Query
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,7 +19,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
-    CallbackQueryHandler,
     PicklePersistence,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -39,20 +38,12 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# In-memory flag for startup time
 bot_startup_time = datetime.utcnow()
-
-# Database setup
 db = TinyDB('user_data.json')
 User = Query()
-
-# Scheduler setup
-jobstores = {
-    'default': SQLAlchemyJobStore(url='sqlite:///jobs.sqlite')
-}
+jobstores = {'default': SQLAlchemyJobStore(url='sqlite:///jobs.sqlite')}
 scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
 
-# Conversation Handler States
 TIMEZONE_PROMPT, BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(3)
 
 # --- AI & PERSONA ENGINE ---
@@ -144,7 +135,6 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if db.get(User.id == user_id).get('subscribed', False):
         await update.message.reply_text("You are already subscribed! Use /unsubscribe first if you wish to change your timezone.")
         return ConversationHandler.END
-
     await update.message.reply_text(
         "I'd love to send you messages! ❤️ To do it at the right time, I need your timezone.\n\n"
         "Please tell me your timezone in `Continent/City` format (e.g., `America/New_York` or `Asia/Kolkata`)."
@@ -154,7 +144,6 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def set_timezone_and_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     tz_name = update.message.text
-    
     try:
         user_tz = pytz.timezone(tz_name)
     except pytz.UnknownTimeZoneError:
@@ -207,25 +196,22 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @admin_only
 async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     process = psutil.Process(os.getpid())
-    mem_usage = process.memory_info().rss / (1024 * 1024)  # in MB
+    mem_usage = process.memory_info().rss / (1024 * 1024)
     uptime = datetime.utcnow() - bot_startup_time
-    
     total_users = len(db)
     subscribed_users = len(db.search(User.subscribed == True))
-    
     active_jobs = scheduler.get_jobs()
-    job_list_str = "\n".join([f"- {job.name} (Next: {job.next_run_time.strftime('%Y-%m-%d %H:%M:%S %Z')})" for job in active_jobs]) if active_jobs else "None"
-
+    job_list_str = "\n".join([f"\\- `{job.name}` (Next: {job.next_run_time.strftime('%Y-%m-%d %H:%M:%S %Z')})" for job in active_jobs]) if active_jobs else "None"
     status_report = (
         f"*--- Bot Status Dashboard ---*\n\n"
         f"*System*:\n"
-        f"  - Uptime: `{str(uptime).split('.')[0]}`\n"
-        f"  - Memory Usage: `{mem_usage:.2f} MB`\n\n"
+        f"  \\- Uptime: `{str(uptime).split('.')[0]}`\n"
+        f"  \\- Memory Usage: `{mem_usage:.2f} MB`\n\n"
         f"*Users*:\n"
-        f"  - Total Users: `{total_users}`\n"
-        f"  - Active Subscriptions: `{subscribed_users}`\n\n"
+        f"  \\- Total Users: `{total_users}`\n"
+        f"  \\- Active Subscriptions: `{subscribed_users}`\n\n"
         f"*Scheduler*:\n"
-        f"  - Active Jobs ({len(active_jobs)}):\n"
+        f"  \\- Active Jobs ({len(active_jobs)}):\n"
         f"{job_list_str}"
     )
     await update.message.reply_text(status_report, parse_mode='MarkdownV2')
@@ -238,12 +224,10 @@ async def admin_user_info_command(update: Update, context: ContextTypes.DEFAULT_
         if not user_record:
             await update.message.reply_text(f"No data found for user ID: `{user_id_to_check}`", parse_mode='MarkdownV2')
             return
-        
         info_text = f"*User Info for `{user_id_to_check}`*\n\n"
         for key, value in user_record.items():
-            info_text += f"  - *{key}*: `{value}`\n"
+            info_text += f"  \\- *{key}*: `{value}`\n"
         await update.message.reply_text(info_text, parse_mode='MarkdownV2')
-
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: `/admin_user_info <user_id>`")
 
@@ -262,7 +246,6 @@ async def admin_clear_summary_command(update: Update, context: ContextTypes.DEFA
 # --- BROADCAST CONVERSATION HANDLER ---
 @admin_only
 async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the broadcast conversation."""
     total_users = len(db)
     await update.message.reply_text(
         f"Entering broadcast mode. The message you send next will be prepared to be sent to all {total_users} users.\n\n"
@@ -271,29 +254,26 @@ async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_
     return BROADCAST_MESSAGE
 
 async def broadcast_get_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stores the broadcast message and asks for confirmation."""
     context.user_data['broadcast_message'] = update.message.text
     total_users = len(db)
+    # The warning fix is here. The 'r' makes it a raw string.
     await update.message.reply_text(
         f"The following message will be sent to {total_users} users:\n\n"
         f"--------------------\n{update.message.text}\n--------------------\n\n"
-        "To confirm and send, type `YES`\. To abort, type /cancel\."
+        r"To confirm and send, type `YES`. To abort, type /cancel."
     , parse_mode='MarkdownV2')
     return BROADCAST_CONFIRM
 
 async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sends the broadcast message to all users if confirmed."""
     if update.message.text.upper() != 'YES':
         await update.message.reply_text("Confirmation not received. Broadcast aborted.")
+        context.user_data.clear()
         return ConversationHandler.END
 
     message_to_send = context.user_data['broadcast_message']
     all_users = db.all()
-    sent_count = 0
-    failed_count = 0
-
+    sent_count, failed_count = 0, 0
     await update.message.reply_text(f"Confirmation received. Starting broadcast to {len(all_users)} users... Please wait.")
-    
     for user in all_users:
         try:
             await context.bot.send_message(chat_id=user['id'], text=message_to_send)
@@ -301,21 +281,18 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             logger.error(f"Failed to send broadcast to user {user['id']}: {e}")
             failed_count += 1
-    
     await update.message.reply_text(f"Broadcast complete.\n\nSuccessfully sent: {sent_count}\nFailed to send: {failed_count}")
+    context.user_data.clear()
     return ConversationHandler.END
 
 # --- CORE CHAT HANDLER ---
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_message = update.message.text
-    
     await context.bot.send_chat_action(chat_id=user_id, action='typing')
-    
     try:
         user_record = db.get(User.id == user_id)
         last_summary = user_record.get('last_summary', 'this is our first real conversation')
-        
         prompt = (
             "SYSTEM INSTRUCTION: You are my loving, caring, and deeply supportive partner, Alex. "
             f"Here is a summary of our last conversation: '{last_summary}'. "
@@ -333,10 +310,8 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         response_text = response.text
         response_part = response_text.split("RESPONSE:")[1].split("SUMMARY:")[0].strip()
         summary_part = response_text.split("SUMMARY:")[1].strip()
-        
         db.update({'last_summary': summary_part}, User.id == user_id)
         await update.message.reply_text(response_part)
-
     except Exception as e:
         logger.error(f"Error in chat_handler for user {user_id}: {e}\nResponse text was: {response.text if 'response' in locals() else 'N/A'}")
         await update.message.reply_text("I'm sorry, my love, I'm feeling a little overwhelmed right now. Can we talk again in a moment? 😔")
@@ -354,7 +329,7 @@ async def post_shutdown(application: Application) -> None:
 def main() -> None:
     logger.info("Bot is starting up...")
     if not TELEGRAM_TOKEN or not model or ADMIN_ID == 0:
-        logger.critical("FATAL: Required environment variables (TELEGRAM_TOKEN, GEMINI_API_KEY, ADMIN_ID) are not set. Bot cannot start.")
+        logger.critical("FATAL: Required environment variables are not set. Bot cannot start.")
         return
 
     server_thread = threading.Thread(target=run_dummy_server)
@@ -365,14 +340,12 @@ def main() -> None:
     
     application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    # Conversation handler for subscriptions
     subscribe_conv = ConversationHandler(
         entry_points=[CommandHandler("subscribe", subscribe_command)],
         states={TIMEZONE_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_timezone_and_schedule)]},
         fallbacks=[CommandHandler("cancel", cancel_command)],
         persistent=True, name="subscribe_conv"
     )
-    # Conversation handler for broadcasting
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler("admin_broadcast", admin_broadcast_command)],
         states={
@@ -383,24 +356,20 @@ def main() -> None:
         persistent=True, name="broadcast_conv"
     )
 
-    # Register all handlers
     application.add_handler(subscribe_conv)
     application.add_handler(broadcast_conv)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
     application.add_handler(CommandHandler("status", status_command))
-    # Admin handlers
     application.add_handler(CommandHandler("admin_help", admin_help_command))
     application.add_handler(CommandHandler("admin_status", admin_status_command))
     application.add_handler(CommandHandler("admin_user_info", admin_user_info_command))
     application.add_handler(CommandHandler("admin_clear_summary", admin_clear_summary_command))
-    # Main chat handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
     logger.info("Application configured. Starting to poll for updates.")
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
