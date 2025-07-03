@@ -1,4 +1,6 @@
 python-telegram-bot[persistence]
-google-generativeai==0.7.1
+google-generativeai
+apscheduler[sqlalchemy]
 pytz
 tinydb
+psutil
